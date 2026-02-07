@@ -8,12 +8,27 @@ from reportlab.lib.styles import getSampleStyleSheet
 import qrcode
 import urllib.parse
 
-# ---------------- DATABASE ----------------
+# ================= UI CONFIG =================
+st.set_page_config(page_title="Coaching ERP", layout="wide")
+
+st.markdown("""
+<style>
+.block-container {padding-top: 1rem;}
+.metric-card {
+    background: #111827;
+    padding: 18px;
+    border-radius: 16px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.section-title {font-size:22px;font-weight:700;margin-top:10px;}
+</style>
+""", unsafe_allow_html=True)
+
+# ================= DATABASE =================
 conn = sqlite3.connect("coaching.db", check_same_thread=False)
 c = conn.cursor()
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS students (
+c.execute("""CREATE TABLE IF NOT EXISTS students (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
     phone TEXT,
@@ -22,25 +37,36 @@ CREATE TABLE IF NOT EXISTS students (
     paid REAL,
     status TEXT,
     date TEXT
-)
-""")
+)""")
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS payments (
+c.execute("""CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     student_id INTEGER,
     amount REAL,
     mode TEXT,
     date TEXT
-)
-""")
+)""")
+
+c.execute("""CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    amount REAL,
+    category TEXT,
+    date TEXT
+)""")
+
+c.execute("""CREATE TABLE IF NOT EXISTS investments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    partner TEXT,
+    amount REAL,
+    date TEXT
+)""")
 
 conn.commit()
 
-# ---------------- LOGIN ----------------
+# ================= LOGIN =================
 USERS = {"arghya": "1234", "friend1": "1234", "friend2": "1234"}
-
-UPI_ID = "yourupi@bank"  # CHANGE THIS
+UPI_ID = "yourupi@bank"  # CHANGE
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -48,207 +74,163 @@ if "logged_in" not in st.session_state:
 
 
 def login():
-    st.title("Coaching Centre ERP Login")
+    st.title("🏫 Coaching Centre ERP Login")
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        if username in USERS and USERS[username] == password:
+        if u in USERS and USERS[u] == p:
             st.session_state.logged_in = True
-            st.session_state.user = username
+            st.session_state.user = u
             st.rerun()
         else:
-            st.error("Wrong username or password")
+            st.error("Wrong credentials")
 
 
-# ---------------- STUDENT FUNCTIONS ----------------
-
-def add_student(name, phone, course, fee, paid):
-    c.execute(
-        "INSERT INTO students (name, phone, course, fee, paid, status, date) VALUES (?, ?, ?, ?, ?, 'active', ?)",
-        (name, phone, course, fee, paid, datetime.now().strftime("%Y-%m-%d")),
-    )
-    student_id = c.lastrowid
-
-    if paid > 0:
-        c.execute(
-            "INSERT INTO payments (student_id, amount, mode, date) VALUES (?, ?, 'offline', ?)",
-            (student_id, paid, datetime.now().strftime("%Y-%m-%d")),
-        )
-
-    conn.commit()
-
-
-def get_students():
-    return c.execute(
-        "SELECT id, name, phone, course, fee, paid, status, date FROM students"
-    ).fetchall()
-
-
-def add_payment(student_id, amount, mode):
-    c.execute(
-        "INSERT INTO payments (student_id, amount, mode, date) VALUES (?, ?, ?, ?)",
-        (student_id, amount, mode, datetime.now().strftime("%Y-%m-%d")),
-    )
-
-    c.execute("UPDATE students SET paid = paid + ? WHERE id=?", (amount, student_id))
-
-    conn.commit()
-
-
-def get_payments(student_id):
-    return c.execute(
-        "SELECT amount, mode, date FROM payments WHERE student_id=?", (student_id,)
-    ).fetchall()
-
-
-def get_student_phone(student_id):
-    row = c.execute("SELECT phone, name FROM students WHERE id=?", (student_id,)).fetchone()
-    return row if row else (None, None)
-
-
-# ---------------- RECEIPT GENERATOR ----------------
+# ================= HELPERS =================
 
 def generate_receipt(student_id, amount, mode):
     student = c.execute("SELECT name, course FROM students WHERE id=?", (student_id,)).fetchone()
 
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer)
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf)
     styles = getSampleStyleSheet()
 
-    elements = []
-    elements.append(Paragraph("Coaching Centre Payment Receipt", styles["Title"]))
-    elements.append(Spacer(1, 20))
+    elems = []
+    elems.append(Paragraph("Coaching Fee Receipt", styles["Title"]))
+    elems.append(Spacer(1, 20))
 
-    data = [
-        ["Student ID", str(student_id)],
-        ["Name", student[0]],
+    table = Table([
+        ["Student", student[0]],
         ["Course", student[1]],
-        ["Amount Paid", f"₹ {amount}"],
-        ["Payment Mode", mode],
+        ["Amount", f"₹ {amount}"],
+        ["Mode", mode],
         ["Date", datetime.now().strftime("%Y-%m-%d")],
-    ]
+    ])
 
-    elements.append(Table(data))
-
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
-
-
-# ---------------- UPI QR ----------------
-
-def generate_upi_qr(amount, name="Coaching Centre"):
-    upi_link = f"upi://pay?pa={UPI_ID}&pn={name}&am={amount}&cu=INR"
-    qr = qrcode.make(upi_link)
-
-    buf = BytesIO()
-    qr.save(buf, format="PNG")
+    elems.append(table)
+    doc.build(elems)
     buf.seek(0)
     return buf
 
 
-# ---------------- WHATSAPP LINK ----------------
-
-def whatsapp_link(student_id, amount, mode):
-    phone, name = get_student_phone(student_id)
-    if not phone:
-        return None
-
-    message = f"Hello {name}, your payment of ₹{amount} via {mode} is received. Thank you!"
-    encoded = urllib.parse.quote(message)
-
-    return f"https://wa.me/91{phone}?text={encoded}"
+def upi_qr(amount):
+    link = f"upi://pay?pa={UPI_ID}&pn=Coaching&am={amount}&cu=INR"
+    img = qrcode.make(link)
+    b = BytesIO()
+    img.save(b, format="PNG")
+    b.seek(0)
+    return b
 
 
-# ---------------- DASHBOARD ----------------
+def whatsapp_link(phone, msg):
+    return f"https://wa.me/91{phone}?text={urllib.parse.quote(msg)}"
+
+
+# ================= DASHBOARD =================
 
 def dashboard():
-    st.set_page_config(page_title="Coaching ERP", layout="wide")
+    st.sidebar.title(f"👋 {st.session_state.user}")
+    page = st.sidebar.radio("Menu", [
+        "🏠 Overview",
+        "🎓 Students",
+        "💰 Payments",
+        "📉 Expenses",
+        "📊 Finance Analytics",
+        "🚪 Logout",
+    ])
 
-    st.sidebar.title(f"Welcome, {st.session_state.user}")
-    page = st.sidebar.radio(
-        "Menu",
-        ["Add Student", "Students List", "Payments", "UPI Collect", "Summary", "Logout"],
-    )
+    # ---------- OVERVIEW ----------
+    if page == "🏠 Overview":
+        st.markdown('<div class="section-title">Business Overview</div>', unsafe_allow_html=True)
 
-    if page == "Logout":
+        total_students = c.execute("SELECT COUNT(*) FROM students WHERE status='active'").fetchone()[0]
+        total_income = c.execute("SELECT SUM(amount) FROM payments").fetchone()[0] or 0
+        total_expense = c.execute("SELECT SUM(amount) FROM expenses").fetchone()[0] or 0
+        profit = total_income - total_expense
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Students", total_students)
+        c2.metric("Income", f"₹ {total_income:.0f}")
+        c3.metric("Expense", f"₹ {total_expense:.0f}")
+        c4.metric("Profit", f"₹ {profit:.0f}")
+
+    # ---------- STUDENTS ----------
+    if page == "🎓 Students":
+        st.subheader("Add Student")
+
+        name = st.text_input("Name")
+        phone = st.text_input("Phone")
+        course = st.text_input("Course")
+        fee = st.number_input("Total Fee", min_value=0.0)
+
+        if st.button("Add Student") and name:
+            c.execute("INSERT INTO students VALUES (NULL,?,?,?,?,?,'active',?)",
+                      (name, phone, course, fee, 0, datetime.now().strftime("%Y-%m-%d")))
+            conn.commit()
+            st.success("Student added")
+
+        df = pd.read_sql_query("SELECT * FROM students", conn)
+        st.dataframe(df)
+
+    # ---------- PAYMENTS ----------
+    if page == "💰 Payments":
+        sid = st.number_input("Student ID", min_value=1)
+        amt = st.number_input("Amount", min_value=0.0)
+        mode = st.selectbox("Mode", ["cash", "upi", "online"])
+
+        if mode == "upi" and amt > 0:
+            st.image(upi_qr(amt))
+
+        if st.button("Record Payment"):
+            c.execute("INSERT INTO payments VALUES (NULL,?,?,?,?)",
+                      (sid, amt, mode, datetime.now().strftime("%Y-%m-%d")))
+            c.execute("UPDATE students SET paid = paid + ? WHERE id=?", (amt, sid))
+            conn.commit()
+
+            receipt = generate_receipt(sid, amt, mode)
+            st.download_button("Download Receipt", receipt, "receipt.pdf")
+
+            phone = c.execute("SELECT phone FROM students WHERE id=?", (sid,)).fetchone()[0]
+            msg = f"Payment of ₹{amt} received. Thank you!"
+            st.markdown(f"[Send WhatsApp]({whatsapp_link(phone,msg)})")
+
+    # ---------- EXPENSES ----------
+    if page == "📉 Expenses":
+        title = st.text_input("Expense title")
+        amt = st.number_input("Amount", min_value=0.0)
+        cat = st.text_input("Category")
+
+        if st.button("Add Expense") and title:
+            c.execute("INSERT INTO expenses VALUES (NULL,?,?,?,?)",
+                      (title, amt, cat, datetime.now().strftime("%Y-%m-%d")))
+            conn.commit()
+            st.success("Expense added")
+
+        df = pd.read_sql_query("SELECT * FROM expenses", conn)
+        st.dataframe(df)
+
+    # ---------- ANALYTICS ----------
+    if page == "📊 Finance Analytics":
+        st.subheader("Income vs Expense")
+
+        income = pd.read_sql_query("SELECT date, SUM(amount) as income FROM payments GROUP BY date", conn)
+        expense = pd.read_sql_query("SELECT date, SUM(amount) as expense FROM expenses GROUP BY date", conn)
+
+        df = pd.merge(income, expense, on="date", how="outer").fillna(0)
+        st.line_chart(df.set_index("date"))
+
+    # ---------- LOGOUT ----------
+    if page == "🚪 Logout":
         st.session_state.logged_in = False
         st.rerun()
 
-    # -------- ADD STUDENT --------
-    if page == "Add Student":
-        st.header("Add New Student")
 
-        name = st.text_input("Student Name")
-        phone = st.text_input("Phone Number")
-        course = st.text_input("Course Name")
-        fee = st.number_input("Total Fee", min_value=0.0)
-        paid = st.number_input("Initial Payment", min_value=0.0)
-
-        if st.button("Add Student") and name:
-            add_student(name, phone, course, fee, paid)
-            st.success("Student added successfully")
-
-    # -------- PAYMENTS --------
-    if page == "Payments":
-        st.header("Offline Payment Entry")
-
-        sid = st.number_input("Student ID", min_value=1, step=1)
-        amount = st.number_input("Payment Amount", min_value=0.0)
-
-        if st.button("Add Offline Payment"):
-            add_payment(sid, amount, "offline")
-            receipt = generate_receipt(sid, amount, "offline")
-            st.download_button("Download Receipt", receipt, "receipt.pdf")
-
-            link = whatsapp_link(sid, amount, "offline")
-            if link:
-                st.markdown(f"[Send Receipt via WhatsApp]({link})")
-
-    # -------- UPI --------
-    if page == "UPI Collect":
-        st.header("Collect via UPI")
-
-        sid = st.number_input("Student ID", min_value=1, step=1)
-        amount = st.number_input("Amount", min_value=0.0)
-
-        if amount > 0:
-            st.image(generate_upi_qr(amount))
-
-        if st.button("Confirm UPI Payment"):
-            add_payment(sid, amount, "upi")
-            receipt = generate_receipt(sid, amount, "upi")
-            st.download_button("Download Receipt", receipt, "upi_receipt.pdf")
-
-            link = whatsapp_link(sid, amount, "upi")
-            if link:
-                st.markdown(f"[Send Receipt via WhatsApp]({link})")
-
-    # -------- SUMMARY --------
-    if page == "Summary":
-        st.header("Business Summary")
-
-        df = pd.DataFrame(
-            get_students(),
-            columns=["ID", "Name", "Phone", "Course", "Fee", "Paid", "Status", "Date"],
-        )
-
-        if not df.empty:
-            total_fee = df["Fee"].sum()
-            total_paid = df["Paid"].sum()
-            total_due = total_fee - total_paid
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Fees", f"₹ {total_fee:.0f}")
-            c2.metric("Collected", f"₹ {total_paid:.0f}")
-            c3.metric("Due", f"₹ {total_due:.0f}")
-
-
-# ---------------- RUN ----------------
+# ================= RUN =================
 if not st.session_state.logged_in:
     login()
 else:
     dashboard()
+
 
