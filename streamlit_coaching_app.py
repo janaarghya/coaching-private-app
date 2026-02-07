@@ -143,9 +143,13 @@ def dashboard():
 
     # ---------- OVERVIEW ----------
     if page == "🏠 Overview":
-        st.markdown('<div class="section-title">Business Overview</div>', unsafe_allow_html=True)
+        st.markdown("## 🏠 Business Overview")
 
-        total_students = c.execute("SELECT COUNT(*) FROM students WHERE status='active'").fetchone()[0]
+        # Handle old DB without status column
+        try:
+            total_students = c.execute("SELECT COUNT(*) FROM students WHERE status='active'").fetchone()[0]
+        except:
+            total_students = c.execute("SELECT COUNT(*) FROM students").fetchone()[0]()[0]
         total_income = c.execute("SELECT SUM(amount) FROM payments").fetchone()[0] or 0
         total_expense = c.execute("SELECT SUM(amount) FROM expenses").fetchone()[0] or 0
         profit = total_income - total_expense
@@ -232,5 +236,6 @@ if not st.session_state.logged_in:
     login()
 else:
     dashboard()
+
 
 
