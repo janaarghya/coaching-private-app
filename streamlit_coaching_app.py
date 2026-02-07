@@ -2,36 +2,35 @@ import streamlit as st
 import sqlite3
 from datetime import datetime
 import pandas as pd
+from io import BytesIO
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+from reportlab.lib.styles import getSampleStyleSheet
+import qrcode
+import urllib.parse
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("coaching.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
-CREATE TABLE IF NOT EXISTS transactions (
+CREATE TABLE IF NOT EXISTS students (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user TEXT,
-    type TEXT,
-    amount REAL,
-    note TEXT,
+    name TEXT,
+    phone TEXT,
+    course TEXT,
+    fee REAL,
+    paid REAL,
+    status TEXT,
     date TEXT
 )
 """)
 
 c.execute("""
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT,
-    done INTEGER
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS students (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    fee REAL,
-    paid REAL,
+    student_id INTEGER,
+    amount REAL,
+    mode TEXT,
     date TEXT
 )
 """)
@@ -41,13 +40,15 @@ conn.commit()
 # ---------------- LOGIN ----------------
 USERS = {"arghya": "1234", "friend1": "1234", "friend2": "1234"}
 
+UPI_ID = "yourupi@bank"  # CHANGE THIS
+
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.user = None
 
 
 def login():
-    st.title("Coaching Centre Private Dashboard")
+    st.title("Coaching Centre ERP Login")
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
@@ -61,152 +62,188 @@ def login():
             st.error("Wrong username or password")
 
 
-# ---------------- FINANCE ----------------
+# ---------------- STUDENT FUNCTIONS ----------------
 
-def add_transaction(user, ttype, amount, note):
+def add_student(name, phone, course, fee, paid):
     c.execute(
-        "INSERT INTO transactions (user, type, amount, note, date) VALUES (?, ?, ?, ?, ?)",
-        (user, ttype, amount, note, datetime.now().strftime("%Y-%m-%d")),
+        "INSERT INTO students (name, phone, course, fee, paid, status, date) VALUES (?, ?, ?, ?, ?, 'active', ?)",
+        (name, phone, course, fee, paid, datetime.now().strftime("%Y-%m-%d")),
     )
-    conn.commit()
+    student_id = c.lastrowid
 
+    if paid > 0:
+        c.execute(
+            "INSERT INTO payments (student_id, amount, mode, date) VALUES (?, ?, 'offline', ?)",
+            (student_id, paid, datetime.now().strftime("%Y-%m-%d")),
+        )
 
-def get_transactions():
-    return c.execute("SELECT user, type, amount, note, date FROM transactions").fetchall()
-
-
-# ---------------- TASKS ----------------
-
-def add_task(text):
-    c.execute("INSERT INTO tasks (text, done) VALUES (?, 0)", (text,))
-    conn.commit()
-
-
-def toggle_task(task_id, done):
-    c.execute("UPDATE tasks SET done=? WHERE id=?", (done, task_id))
-    conn.commit()
-
-
-def get_tasks():
-    return c.execute("SELECT id, text, done FROM tasks").fetchall()
-
-
-# ---------------- STUDENTS ----------------
-
-def add_student(name, fee, paid):
-    c.execute(
-        "INSERT INTO students (name, fee, paid, date) VALUES (?, ?, ?, ?)",
-        (name, fee, paid, datetime.now().strftime("%Y-%m-%d")),
-    )
     conn.commit()
 
 
 def get_students():
-    return c.execute("SELECT name, fee, paid, date FROM students").fetchall()
+    return c.execute(
+        "SELECT id, name, phone, course, fee, paid, status, date FROM students"
+    ).fetchall()
+
+
+def add_payment(student_id, amount, mode):
+    c.execute(
+        "INSERT INTO payments (student_id, amount, mode, date) VALUES (?, ?, ?, ?)",
+        (student_id, amount, mode, datetime.now().strftime("%Y-%m-%d")),
+    )
+
+    c.execute("UPDATE students SET paid = paid + ? WHERE id=?", (amount, student_id))
+
+    conn.commit()
+
+
+def get_payments(student_id):
+    return c.execute(
+        "SELECT amount, mode, date FROM payments WHERE student_id=?", (student_id,)
+    ).fetchall()
+
+
+def get_student_phone(student_id):
+    row = c.execute("SELECT phone, name FROM students WHERE id=?", (student_id,)).fetchone()
+    return row if row else (None, None)
+
+
+# ---------------- RECEIPT GENERATOR ----------------
+
+def generate_receipt(student_id, amount, mode):
+    student = c.execute("SELECT name, course FROM students WHERE id=?", (student_id,)).fetchone()
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer)
+    styles = getSampleStyleSheet()
+
+    elements = []
+    elements.append(Paragraph("Coaching Centre Payment Receipt", styles["Title"]))
+    elements.append(Spacer(1, 20))
+
+    data = [
+        ["Student ID", str(student_id)],
+        ["Name", student[0]],
+        ["Course", student[1]],
+        ["Amount Paid", f"₹ {amount}"],
+        ["Payment Mode", mode],
+        ["Date", datetime.now().strftime("%Y-%m-%d")],
+    ]
+
+    elements.append(Table(data))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
+# ---------------- UPI QR ----------------
+
+def generate_upi_qr(amount, name="Coaching Centre"):
+    upi_link = f"upi://pay?pa={UPI_ID}&pn={name}&am={amount}&cu=INR"
+    qr = qrcode.make(upi_link)
+
+    buf = BytesIO()
+    qr.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+# ---------------- WHATSAPP LINK ----------------
+
+def whatsapp_link(student_id, amount, mode):
+    phone, name = get_student_phone(student_id)
+    if not phone:
+        return None
+
+    message = f"Hello {name}, your payment of ₹{amount} via {mode} is received. Thank you!"
+    encoded = urllib.parse.quote(message)
+
+    return f"https://wa.me/91{phone}?text={encoded}"
 
 
 # ---------------- DASHBOARD ----------------
 
 def dashboard():
-    st.set_page_config(page_title="Coaching Dashboard", layout="wide")
+    st.set_page_config(page_title="Coaching ERP", layout="wide")
 
     st.sidebar.title(f"Welcome, {st.session_state.user}")
     page = st.sidebar.radio(
-        "Go to",
-        ["Finance", "Students", "Planning", "Summary", "Reports", "Logout"],
+        "Menu",
+        ["Add Student", "Students List", "Payments", "UPI Collect", "Summary", "Logout"],
     )
 
     if page == "Logout":
         st.session_state.logged_in = False
         st.rerun()
 
-    # -------- FINANCE --------
-    if page == "Finance":
-        st.header("Add Transaction")
+    # -------- ADD STUDENT --------
+    if page == "Add Student":
+        st.header("Add New Student")
 
-        col1, col2 = st.columns(2)
-        amount = col1.number_input("Amount", min_value=0.0, step=100.0)
-        note = col2.text_input("Note")
+        name = st.text_input("Student Name")
+        phone = st.text_input("Phone Number")
+        course = st.text_input("Course Name")
+        fee = st.number_input("Total Fee", min_value=0.0)
+        paid = st.number_input("Initial Payment", min_value=0.0)
 
-        b1, b2 = st.columns(2)
-        if b1.button("Add Inflow"):
-            add_transaction(st.session_state.user, "in", amount, note)
-            st.success("Inflow added")
+        if st.button("Add Student") and name:
+            add_student(name, phone, course, fee, paid)
+            st.success("Student added successfully")
 
-        if b2.button("Add Outflow"):
-            add_transaction(st.session_state.user, "out", amount, note)
-            st.success("Outflow added")
+    # -------- PAYMENTS --------
+    if page == "Payments":
+        st.header("Offline Payment Entry")
 
-        st.subheader("Transaction History")
-        st.dataframe(pd.DataFrame(get_transactions(), columns=["User", "Type", "Amount", "Note", "Date"]))
+        sid = st.number_input("Student ID", min_value=1, step=1)
+        amount = st.number_input("Payment Amount", min_value=0.0)
 
-    # -------- STUDENTS --------
-    if page == "Students":
-        st.header("Student Fee Tracking")
+        if st.button("Add Offline Payment"):
+            add_payment(sid, amount, "offline")
+            receipt = generate_receipt(sid, amount, "offline")
+            st.download_button("Download Receipt", receipt, "receipt.pdf")
 
-        col1, col2, col3 = st.columns(3)
-        name = col1.text_input("Student Name")
-        fee = col2.number_input("Total Fee", min_value=0.0)
-        paid = col3.number_input("Amount Paid", min_value=0.0)
+            link = whatsapp_link(sid, amount, "offline")
+            if link:
+                st.markdown(f"[Send Receipt via WhatsApp]({link})")
 
-        if st.button("Add Student Record") and name:
-            add_student(name, fee, paid)
-            add_transaction(st.session_state.user, "in", paid, f"Fee from {name}")
-            st.success("Student added & payment recorded")
+    # -------- UPI --------
+    if page == "UPI Collect":
+        st.header("Collect via UPI")
 
-        st.subheader("Student Records")
-        students_df = pd.DataFrame(get_students(), columns=["Name", "Fee", "Paid", "Date"])
-        st.dataframe(students_df)
+        sid = st.number_input("Student ID", min_value=1, step=1)
+        amount = st.number_input("Amount", min_value=0.0)
 
-    # -------- PLANNING --------
-    if page == "Planning":
-        st.header("Tasks & Future Planning")
+        if amount > 0:
+            st.image(generate_upi_qr(amount))
 
-        new_task = st.text_input("New Task")
-        if st.button("Add Task") and new_task:
-            add_task(new_task)
-            st.success("Task added")
+        if st.button("Confirm UPI Payment"):
+            add_payment(sid, amount, "upi")
+            receipt = generate_receipt(sid, amount, "upi")
+            st.download_button("Download Receipt", receipt, "upi_receipt.pdf")
 
-        for task_id, text, done in get_tasks():
-            checked = st.checkbox(text, value=bool(done))
-            if checked != bool(done):
-                toggle_task(task_id, int(checked))
-                st.rerun()
+            link = whatsapp_link(sid, amount, "upi")
+            if link:
+                st.markdown(f"[Send Receipt via WhatsApp]({link})")
 
     # -------- SUMMARY --------
     if page == "Summary":
         st.header("Business Summary")
 
-        data = get_transactions()
-
-        total_in = sum(a for u, t, a, n, d in data if t == "in")
-        total_out = sum(a for u, t, a, n, d in data if t == "out")
-        balance = total_in - total_out
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total Inflow", f"₹ {total_in:.2f}")
-        m2.metric("Total Outflow", f"₹ {total_out:.2f}")
-        m3.metric("Net Profit", f"₹ {balance:.2f}")
-
-        st.subheader("Partner-wise Profit Split")
-        partners = {"arghya": 0, "friend1": 0, "friend2": 0}
-        for u, t, a, n, d in data:
-            partners[u] += a if t == "in" else -a
-
-        split_df = pd.DataFrame(
-            {"Partner": partners.keys(), "Amount": partners.values()}
+        df = pd.DataFrame(
+            get_students(),
+            columns=["ID", "Name", "Phone", "Course", "Fee", "Paid", "Status", "Date"],
         )
-        st.table(split_df)
 
-    # -------- REPORTS --------
-    if page == "Reports":
-        st.header("Download Reports")
+        if not df.empty:
+            total_fee = df["Fee"].sum()
+            total_paid = df["Paid"].sum()
+            total_due = total_fee - total_paid
 
-        tx_df = pd.DataFrame(get_transactions(), columns=["User", "Type", "Amount", "Note", "Date"])
-        st.dataframe(tx_df)
-
-        csv = tx_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Transactions CSV", csv, "transactions.csv", "text/csv")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Fees", f"₹ {total_fee:.0f}")
+            c2.metric("Collected", f"₹ {total_paid:.0f}")
+            c3.metric("Due", f"₹ {total_due:.0f}")
 
 
 # ---------------- RUN ----------------
@@ -214,3 +251,4 @@ if not st.session_state.logged_in:
     login()
 else:
     dashboard()
+
