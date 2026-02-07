@@ -282,7 +282,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS investments (
 conn.commit()
 
 # ================= CONFIG =================
-USERS = {"arghya": "1234", "friend1": "1234", "friend2": "1234"}
+USERS = {"Arghya": "Arghya@123", "Suman": "Suman@8348", "Tapan": "Tapan@6296"}
 UPI_ID = "yourupi@bank"  # CHANGE THIS
 
 if "logged_in" not in st.session_state:
