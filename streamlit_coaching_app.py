@@ -141,38 +141,24 @@ def dashboard():
         "🚪 Logout",
     ])
 
-    
     # ---------- OVERVIEW ----------
-if page == "🏠 Overview":
-    st.title("🏠 Business Overview")
+    if page == "🏠 Overview":
+        st.markdown("## 🏠 Business Overview")
 
-    # Safe student count
-    try:
-        total_students = c.execute(
-            "SELECT COUNT(*) FROM students WHERE status='active'"
-        ).fetchone()[0]
-    except:
-        total_students = c.execute(
-            "SELECT COUNT(*) FROM students"
-        ).fetchone()[0]
+        # Handle old DB without status column
+        try:
+            total_students = c.execute("SELECT COUNT(*) FROM students WHERE status='active'").fetchone()[0]
+        except:
+            total_students = c.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+        total_income = c.execute("SELECT SUM(amount) FROM payments").fetchone()[0] or 0
+        total_expense = c.execute("SELECT SUM(amount) FROM expenses").fetchone()[0] or 0
+        profit = total_income - total_expense
 
-    # Safe sums
-    total_income = c.execute(
-        "SELECT COALESCE(SUM(amount),0) FROM payments"
-    ).fetchone()[0]
-
-    total_expense = c.execute(
-        "SELECT COALESCE(SUM(amount),0) FROM expenses"
-    ).fetchone()[0]
-
-    profit = total_income - total_expense
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Students", total_students)
-    c2.metric("Income", f"₹ {total_income:.0f}")
-    c3.metric("Expense", f"₹ {total_expense:.0f}")
-    c4.metric("Profit", f"₹ {profit:.0f}")
-
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Students", total_students)
+        c2.metric("Income", f"₹ {total_income:.0f}")
+        c3.metric("Expense", f"₹ {total_expense:.0f}")
+        c4.metric("Profit", f"₹ {profit:.0f}")
 
     # ---------- STUDENTS ----------
     if page == "🎓 Students":
@@ -250,6 +236,7 @@ if not st.session_state.logged_in:
     login()
 else:
     dashboard()
+
 
 
 
