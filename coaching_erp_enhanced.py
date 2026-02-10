@@ -1,4 +1,8 @@
 import streamlit as st
+
+st.write(st.secrets)   # DEBUG LINE
+
+
 from datetime import datetime
 import pandas as pd
 from io import BytesIO
