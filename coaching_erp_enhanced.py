@@ -1,5 +1,4 @@
 import streamlit as st
-import sqlite3
 from datetime import datetime
 import pandas as pd
 from io import BytesIO
@@ -9,6 +8,9 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 import qrcode
 import urllib.parse
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 
 # ================= UI CONFIG =================
 st.set_page_config(
@@ -61,6 +63,15 @@ st.markdown("""
         margin-top: 0.5rem;
     }
     
+    /* Investor Card */
+    .investor-card {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 1.5rem;
+        border-radius: 20px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+        margin-bottom: 1rem;
+    }
+    
     /* Section Headers */
     .section-header {
         font-size: 1.8rem;
@@ -106,6 +117,11 @@ st.markdown("""
         box-shadow: 0 8px 16px rgba(102,126,234,0.3);
     }
     
+    /* Delete Button */
+    .stButton > button[kind="secondary"] {
+        background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    }
+    
     /* Input Fields */
     .stTextInput > div > div > input,
     .stNumberInput > div > div > input,
@@ -124,61 +140,10 @@ st.markdown("""
         box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
     }
     
-    /* Navigation Tabs */
-    .nav-container {
-        background: white;
-        border-radius: 16px;
-        padding: 0.5rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        overflow-x: auto;
-        display: flex;
-        gap: 0.5rem;
-    }
-    
-    .nav-tab {
-        padding: 0.75rem 1.5rem;
-        border-radius: 12px;
-        background: transparent;
-        border: none;
-        cursor: pointer;
-        font-weight: 600;
-        color: #6b7280;
-        transition: all 0.3s ease;
-        white-space: nowrap;
-    }
-    
-    .nav-tab:hover {
-        background: #f3f4f6;
-        color: #667eea;
-    }
-    
-    .nav-tab.active {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-    }
-    
-    /* Data Tables */
-    .dataframe {
-        border-radius: 12px;
-        overflow: hidden;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-    }
-    
     /* Success/Error Messages */
     .stSuccess, .stError, .stWarning {
         border-radius: 12px;
         padding: 1rem;
-    }
-    
-    /* QR Code Container */
-    .qr-container {
-        background: white;
-        padding: 2rem;
-        border-radius: 16px;
-        text-align: center;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        margin: 1rem 0;
     }
     
     /* Mobile Responsive */
@@ -201,25 +166,6 @@ st.markdown("""
         }
     }
     
-    /* Status Badge */
-    .status-badge {
-        display: inline-block;
-        padding: 0.25rem 0.75rem;
-        border-radius: 12px;
-        font-size: 0.8rem;
-        font-weight: 600;
-    }
-    
-    .status-active {
-        background: #d1fae5;
-        color: #065f46;
-    }
-    
-    .status-pending {
-        background: #fef3c7;
-        color: #92400e;
-    }
-    
     /* WhatsApp Link */
     .whatsapp-link {
         display: inline-block;
@@ -240,61 +186,316 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= DATABASE =================
-conn = sqlite3.connect("coaching.db", check_same_thread=False)
-c = conn.cursor()
+# ================= GOOGLE SHEETS SETUP =================
 
-# Create tables
-c.execute("""CREATE TABLE IF NOT EXISTS students (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    phone TEXT,
-    course TEXT,
-    fee REAL,
-    paid REAL,
-    status TEXT,
-    date TEXT
-)""")
+@st.cache_resource
+def init_google_sheets():
+    """Initialize Google Sheets connection"""
+    try:
+        # Get credentials from Streamlit secrets
+        credentials_dict = dict(st.secrets["gcp_service_account"])
+        
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(
+            credentials_dict, scope
+        )
+        
+        client = gspread.authorize(credentials)
+        
+        # Get spreadsheet
+        spreadsheet_id = st.secrets["spreadsheet_id"]
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        
+        # Initialize sheets if they don't exist
+        try:
+            students_sheet = spreadsheet.worksheet("students")
+        except:
+            students_sheet = spreadsheet.add_worksheet(title="students", rows="1000", cols="10")
+            students_sheet.update('A1:H1', [['id', 'name', 'phone', 'course', 'fee', 'paid', 'status', 'date']])
+        
+        try:
+            payments_sheet = spreadsheet.worksheet("payments")
+        except:
+            payments_sheet = spreadsheet.add_worksheet(title="payments", rows="1000", cols="10")
+            payments_sheet.update('A1:E1', [['id', 'student_id', 'amount', 'mode', 'date']])
+        
+        try:
+            expenses_sheet = spreadsheet.worksheet("expenses")
+        except:
+            expenses_sheet = spreadsheet.add_worksheet(title="expenses", rows="1000", cols="10")
+            expenses_sheet.update('A1:E1', [['id', 'title', 'amount', 'category', 'date']])
+        
+        try:
+            investments_sheet = spreadsheet.worksheet("investments")
+        except:
+            investments_sheet = spreadsheet.add_worksheet(title="investments", rows="1000", cols="10")
+            investments_sheet.update('A1:E1', [['id', 'investor', 'amount', 'date', 'notes']])
+        
+        return {
+            'students': students_sheet,
+            'payments': payments_sheet,
+            'expenses': expenses_sheet,
+            'investments': investments_sheet
+        }
+    
+    except Exception as e:
+        st.error(f"Error connecting to Google Sheets: {e}")
+        st.info("Please check your secrets configuration in Streamlit Cloud.")
+        return None
 
-c.execute("""CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER,
-    amount REAL,
-    mode TEXT,
-    date TEXT
-)""")
+# Initialize sheets
+sheets = init_google_sheets()
 
-c.execute("""CREATE TABLE IF NOT EXISTS expenses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    amount REAL,
-    category TEXT,
-    date TEXT
-)""")
+# ================= DATABASE OPERATIONS =================
 
-c.execute("""CREATE TABLE IF NOT EXISTS investments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    partner TEXT,
-    amount REAL,
-    date TEXT
-)""")
+def get_next_id(sheet_name):
+    """Get next available ID for a sheet"""
+    try:
+        sheet = sheets[sheet_name]
+        all_records = sheet.get_all_records()
+        if not all_records:
+            return 1
+        max_id = max([int(record['id']) for record in all_records if record.get('id')])
+        return max_id + 1
+    except:
+        return 1
 
-conn.commit()
+def add_student(name, phone, course, fee):
+    """Add student to Google Sheets"""
+    try:
+        sheet = sheets['students']
+        student_id = get_next_id('students')
+        date = datetime.now().strftime("%Y-%m-%d")
+        
+        sheet.append_row([student_id, name, phone, course, fee, 0, 'active', date])
+        return student_id
+    except Exception as e:
+        st.error(f"Error adding student: {e}")
+        return None
+
+def get_students_df():
+    """Get all students as DataFrame"""
+    try:
+        sheet = sheets['students']
+        data = sheet.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=['id', 'name', 'phone', 'course', 'fee', 'paid', 'status', 'date'])
+        df = pd.DataFrame(data)
+        # Convert numeric columns
+        df['id'] = pd.to_numeric(df['id'], errors='coerce')
+        df['fee'] = pd.to_numeric(df['fee'], errors='coerce')
+        df['paid'] = pd.to_numeric(df['paid'], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Error fetching students: {e}")
+        return pd.DataFrame()
+
+def update_student_payment(student_id, amount):
+    """Update student paid amount"""
+    try:
+        sheet = sheets['students']
+        all_records = sheet.get_all_records()
+        
+        for idx, record in enumerate(all_records, start=2):  # Start from row 2 (after header)
+            if int(record['id']) == student_id:
+                current_paid = float(record.get('paid', 0))
+                new_paid = current_paid + amount
+                sheet.update_cell(idx, 6, new_paid)  # Column 6 is 'paid'
+                return True
+        return False
+    except Exception as e:
+        st.error(f"Error updating student payment: {e}")
+        return False
+
+def delete_student(student_id):
+    """Delete student from Google Sheets"""
+    try:
+        sheet = sheets['students']
+        all_records = sheet.get_all_records()
+        
+        for idx, record in enumerate(all_records, start=2):
+            if int(record['id']) == student_id:
+                sheet.delete_rows(idx)
+                return True
+        return False
+    except Exception as e:
+        st.error(f"Error deleting student: {e}")
+        return False
+
+def add_payment(student_id, amount, mode):
+    """Add payment to Google Sheets"""
+    try:
+        sheet = sheets['payments']
+        payment_id = get_next_id('payments')
+        date = datetime.now().strftime("%Y-%m-%d")
+        
+        sheet.append_row([payment_id, student_id, amount, mode, date])
+        update_student_payment(student_id, amount)
+        return payment_id
+    except Exception as e:
+        st.error(f"Error adding payment: {e}")
+        return None
+
+def get_payments_df():
+    """Get all payments as DataFrame"""
+    try:
+        sheet = sheets['payments']
+        data = sheet.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=['id', 'student_id', 'amount', 'mode', 'date'])
+        df = pd.DataFrame(data)
+        df['id'] = pd.to_numeric(df['id'], errors='coerce')
+        df['student_id'] = pd.to_numeric(df['student_id'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Error fetching payments: {e}")
+        return pd.DataFrame()
+
+def delete_payment(payment_id):
+    """Delete payment from Google Sheets"""
+    try:
+        # Get payment details first
+        payments_df = get_payments_df()
+        payment = payments_df[payments_df['id'] == payment_id]
+        
+        if not payment.empty:
+            student_id = int(payment.iloc[0]['student_id'])
+            amount = float(payment.iloc[0]['amount'])
+            
+            # Delete from sheet
+            sheet = sheets['payments']
+            all_records = sheet.get_all_records()
+            
+            for idx, record in enumerate(all_records, start=2):
+                if int(record['id']) == payment_id:
+                    sheet.delete_rows(idx)
+                    # Reverse the payment from student
+                    update_student_payment(student_id, -amount)
+                    return True
+        return False
+    except Exception as e:
+        st.error(f"Error deleting payment: {e}")
+        return False
+
+def add_expense(title, amount, category):
+    """Add expense to Google Sheets"""
+    try:
+        sheet = sheets['expenses']
+        expense_id = get_next_id('expenses')
+        date = datetime.now().strftime("%Y-%m-%d")
+        
+        sheet.append_row([expense_id, title, amount, category, date])
+        return expense_id
+    except Exception as e:
+        st.error(f"Error adding expense: {e}")
+        return None
+
+def get_expenses_df():
+    """Get all expenses as DataFrame"""
+    try:
+        sheet = sheets['expenses']
+        data = sheet.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=['id', 'title', 'amount', 'category', 'date'])
+        df = pd.DataFrame(data)
+        df['id'] = pd.to_numeric(df['id'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Error fetching expenses: {e}")
+        return pd.DataFrame()
+
+def delete_expense(expense_id):
+    """Delete expense from Google Sheets"""
+    try:
+        sheet = sheets['expenses']
+        all_records = sheet.get_all_records()
+        
+        for idx, record in enumerate(all_records, start=2):
+            if int(record['id']) == expense_id:
+                sheet.delete_rows(idx)
+                return True
+        return False
+    except Exception as e:
+        st.error(f"Error deleting expense: {e}")
+        return False
+
+def add_investment(investor, amount, notes=""):
+    """Add investment to Google Sheets"""
+    try:
+        sheet = sheets['investments']
+        investment_id = get_next_id('investments')
+        date = datetime.now().strftime("%Y-%m-%d")
+        
+        sheet.append_row([investment_id, investor, amount, date, notes])
+        return investment_id
+    except Exception as e:
+        st.error(f"Error adding investment: {e}")
+        return None
+
+def get_investments_df():
+    """Get all investments as DataFrame"""
+    try:
+        sheet = sheets['investments']
+        data = sheet.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=['id', 'investor', 'amount', 'date', 'notes'])
+        df = pd.DataFrame(data)
+        df['id'] = pd.to_numeric(df['id'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Error fetching investments: {e}")
+        return pd.DataFrame()
+
+def delete_investment(investment_id):
+    """Delete investment from Google Sheets"""
+    try:
+        sheet = sheets['investments']
+        all_records = sheet.get_all_records()
+        
+        for idx, record in enumerate(all_records, start=2):
+            if int(record['id']) == investment_id:
+                sheet.delete_rows(idx)
+                return True
+        return False
+    except Exception as e:
+        st.error(f"Error deleting investment: {e}")
+        return False
+
+def get_student_by_id(student_id):
+    """Get student details by ID"""
+    students_df = get_students_df()
+    if students_df.empty:
+        return None
+    student = students_df[students_df['id'] == student_id]
+    if student.empty:
+        return None
+    return student.iloc[0].to_dict()
 
 # ================= CONFIG =================
 USERS = {"Arghya": "Arghya@9382", "Suman": "Suman@8348", "Tapan": "Tapan@6296"}
 UPI_ID = "yourupi@bank"  # CHANGE THIS
 
+# Investor names (can be configured)
+INVESTORS = ["arghya", "Suman", "Tapan"]
+
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.user = None
-    st.session_state.page = "🏠 Overview"
 
 # ================= HELPER FUNCTIONS =================
 
 def generate_receipt(student_id, amount, mode):
     """Generate PDF receipt"""
-    student = c.execute("SELECT name, course, phone FROM students WHERE id=?", (student_id,)).fetchone()
+    student = get_student_by_id(student_id)
+    if not student:
+        return None
     
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
@@ -302,17 +503,15 @@ def generate_receipt(student_id, amount, mode):
     
     elems = []
     
-    # Title
     title = Paragraph("<b>COACHING FEE RECEIPT</b>", styles["Title"])
     elems.append(title)
     elems.append(Spacer(1, 30))
     
-    # Receipt details
     data = [
         ["Receipt ID:", f"RCP-{student_id}-{datetime.now().strftime('%Y%m%d%H%M')}"],
-        ["Student Name:", student[0]],
-        ["Course:", student[1]],
-        ["Phone:", student[2]],
+        ["Student Name:", str(student['name'])],
+        ["Course:", str(student['course'])],
+        ["Phone:", str(student['phone'])],
         ["Amount Paid:", f"₹ {amount:.2f}"],
         ["Payment Mode:", mode.upper()],
         ["Date:", datetime.now().strftime("%d-%m-%Y %I:%M %p")],
@@ -334,14 +533,12 @@ def generate_receipt(student_id, amount, mode):
     elems.append(table)
     elems.append(Spacer(1, 40))
     
-    # Footer
     footer = Paragraph("<i>Thank you for your payment!</i>", styles["Normal"])
     elems.append(footer)
     
     doc.build(elems)
     buf.seek(0)
     return buf
-
 
 def upi_qr(amount):
     """Generate UPI QR code"""
@@ -353,14 +550,12 @@ def upi_qr(amount):
     b.seek(0)
     return b
 
-
 def whatsapp_link(phone, msg):
     """Generate WhatsApp link"""
-    clean_phone = phone.replace("+", "").replace("-", "").replace(" ", "")
+    clean_phone = str(phone).replace("+", "").replace("-", "").replace(" ", "")
     if not clean_phone.startswith("91"):
         clean_phone = "91" + clean_phone
     return f"https://wa.me/{clean_phone}?text={urllib.parse.quote(msg)}"
-
 
 def metric_card(label, value, icon="📊"):
     """Create a metric card"""
@@ -369,6 +564,16 @@ def metric_card(label, value, icon="📊"):
         <div style="font-size: 2rem;">{icon}</div>
         <p class="metric-value">{value}</p>
         <p class="metric-label">{label}</p>
+    </div>
+    """
+
+def investor_card(name, amount, icon="💼"):
+    """Create an investor card"""
+    return f"""
+    <div class="investor-card">
+        <div style="font-size: 2rem;">{icon}</div>
+        <p class="metric-value">₹{amount:,.0f}</p>
+        <p class="metric-label">{name}</p>
     </div>
     """
 
@@ -399,26 +604,29 @@ def login_page():
                 st.error("❌ Invalid credentials")
     
     st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Demo credentials hint
     st.markdown("---")
     st.markdown("*Demo: arghya / 1234*")
-
 
 # ================= DASHBOARD PAGES =================
 
 def overview_page():
     """Overview dashboard"""
+    if not sheets:
+        st.error("⚠️ Google Sheets not connected. Please check configuration.")
+        return
+    
     st.markdown("# 🏠 Dashboard Overview")
     
-    # Fetch metrics
-    try:
-        total_students = c.execute("SELECT COUNT(*) FROM students WHERE status='active'").fetchone()[0]
-    except:
-        total_students = c.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+    # Fetch data
+    students_df = get_students_df()
+    payments_df = get_payments_df()
+    expenses_df = get_expenses_df()
+    investments_df = get_investments_df()
     
-    total_income = c.execute("SELECT SUM(amount) FROM payments").fetchone()[0] or 0
-    total_expense = c.execute("SELECT SUM(amount) FROM expenses").fetchone()[0] or 0
+    total_students = len(students_df[students_df['status'] == 'active']) if not students_df.empty else 0
+    total_income = float(payments_df['amount'].sum()) if not payments_df.empty else 0
+    total_expense = float(expenses_df['amount'].sum()) if not expenses_df.empty else 0
+    total_investment = float(investments_df['amount'].sum()) if not investments_df.empty else 0
     profit = total_income - total_expense
     
     # Display metrics
@@ -437,25 +645,47 @@ def overview_page():
         color = "🟢" if profit >= 0 else "🔴"
         st.markdown(metric_card("Net Profit", f"₹{profit:,.0f}", color), unsafe_allow_html=True)
     
+    # Investment Overview
+    st.markdown("---")
+    st.markdown("### 💼 Investment Overview")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(metric_card("Total Investment", f"₹{total_investment:,.0f}", "💼"), unsafe_allow_html=True)
+    
+    # Show individual investor contributions
+    if not investments_df.empty:
+        investor_totals = investments_df.groupby('investor')['amount'].sum().to_dict()
+        
+        cols = [col2, col3, col4]
+        for idx, investor in enumerate(INVESTORS):
+            if idx < len(cols):
+                amount = investor_totals.get(investor, 0)
+                with cols[idx]:
+                    st.markdown(investor_card(investor.title(), amount, "👤"), unsafe_allow_html=True)
+    
     # Recent activity
     st.markdown("---")
     st.markdown("### 📊 Recent Payments")
     
-    recent_payments = pd.read_sql_query("""
-        SELECT p.date, s.name, p.amount, p.mode 
-        FROM payments p
-        JOIN students s ON p.student_id = s.id
-        ORDER BY p.id DESC LIMIT 5
-    """, conn)
-    
-    if not recent_payments.empty:
-        st.dataframe(recent_payments, use_container_width=True, hide_index=True)
+    if not payments_df.empty and not students_df.empty:
+        recent = payments_df.tail(5).copy()
+        recent['student_name'] = recent['student_id'].apply(
+            lambda x: get_student_by_id(int(x))['name'] if get_student_by_id(int(x)) else 'Unknown'
+        )
+        recent = recent[['date', 'student_name', 'amount', 'mode']]
+        recent.columns = ['Date', 'Student', 'Amount', 'Mode']
+        st.dataframe(recent, use_container_width=True, hide_index=True)
     else:
         st.info("No payments recorded yet")
 
-
 def students_page():
     """Student management"""
+    if not sheets:
+        st.error("⚠️ Google Sheets not connected.")
+        return
+    
     st.markdown("# 🎓 Student Management")
     
     # Add student form
@@ -475,64 +705,86 @@ def students_page():
             
             if submitted:
                 if name and phone and course and fee > 0:
-                    c.execute("INSERT INTO students VALUES (NULL,?,?,?,?,?,'active',?)",
-                             (name, phone, course, fee, 0, datetime.now().strftime("%Y-%m-%d")))
-                    conn.commit()
-                    st.success(f"✅ Student '{name}' added successfully!")
-                    st.rerun()
+                    student_id = add_student(name, phone, course, fee)
+                    if student_id:
+                        st.success(f"✅ Student '{name}' added successfully! ID: {student_id}")
+                        st.rerun()
                 else:
                     st.error("Please fill all required fields")
     
     # Display students
     st.markdown("### 📋 All Students")
     
-    students_df = pd.read_sql_query("""
-        SELECT 
-            id as 'ID',
-            name as 'Name',
-            phone as 'Phone',
-            course as 'Course',
-            fee as 'Total Fee',
-            paid as 'Paid',
-            (fee - paid) as 'Pending',
-            status as 'Status',
-            date as 'Enrolled'
-        FROM students
-        ORDER BY id DESC
-    """, conn)
+    students_df = get_students_df()
     
     if not students_df.empty:
+        display_df = students_df.copy()
+        display_df['pending'] = display_df['fee'] - display_df['paid']
+        display_df = display_df[['id', 'name', 'phone', 'course', 'fee', 'paid', 'pending', 'status', 'date']]
+        display_df.columns = ['ID', 'Name', 'Phone', 'Course', 'Total Fee', 'Paid', 'Pending', 'Status', 'Enrolled']
+        
         # Search filter
         search = st.text_input("🔍 Search students", placeholder="Search by name or phone")
         if search:
-            students_df = students_df[
-                students_df['Name'].str.contains(search, case=False, na=False) |
-                students_df['Phone'].str.contains(search, case=False, na=False)
+            display_df = display_df[
+                display_df['Name'].astype(str).str.contains(search, case=False, na=False) |
+                display_df['Phone'].astype(str).str.contains(search, case=False, na=False)
             ]
         
-        st.dataframe(students_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Delete student section
+        st.markdown("---")
+        st.markdown("### 🗑️ Delete Student")
+        
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            delete_id = st.number_input("Student ID to Delete", min_value=1, step=1)
+        
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("🗑️ Delete Student", type="secondary", use_container_width=True):
+                if delete_student(int(delete_id)):
+                    st.success(f"✅ Student ID {delete_id} deleted successfully!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ Student ID {delete_id} not found!")
         
         # Statistics
+        st.markdown("---")
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Students", len(students_df))
-        col2.metric("Total Fees", f"₹{students_df['Total Fee'].sum():,.0f}")
-        col3.metric("Pending", f"₹{students_df['Pending'].sum():,.0f}")
+        col2.metric("Total Fees", f"₹{students_df['fee'].sum():,.0f}")
+        col3.metric("Pending", f"₹{(students_df['fee'] - students_df['paid']).sum():,.0f}")
     else:
         st.info("No students added yet. Add your first student above!")
 
-
 def payments_page():
     """Payment collection"""
+    if not sheets:
+        st.error("⚠️ Google Sheets not connected.")
+        return
+    
     st.markdown("# 💰 Payment Collection")
+    
+    students_df = get_students_df()
+    active_students = students_df[students_df['status'] == 'active'] if not students_df.empty else pd.DataFrame()
+    
+    if active_students.empty:
+        st.warning("⚠️ No active students found. Please add students first.")
+        return
     
     # Payment form
     with st.form("payment_form"):
         col1, col2 = st.columns(2)
         
         with col1:
-            # Get student list
-            students = c.execute("SELECT id, name, (fee - paid) as pending FROM students WHERE status='active'").fetchall()
-            student_options = {f"{s[0]} - {s[1]} (Pending: ₹{s[2]:.0f})": s[0] for s in students}
+            student_options = {}
+            for _, student in active_students.iterrows():
+                pending = student['fee'] - student['paid']
+                label = f"{int(student['id'])} - {student['name']} (Pending: ₹{pending:.0f})"
+                student_options[label] = int(student['id'])
             
             selected_student = st.selectbox("Select Student*", options=list(student_options.keys()))
             student_id = student_options[selected_student] if selected_student else None
@@ -541,11 +793,10 @@ def payments_page():
         
         with col2:
             mode = st.selectbox("Payment Mode*", ["Cash", "UPI", "Online Transfer", "Cheque"])
-            st.write("")  # Spacing
-            st.write("")  # Spacing
+            st.write("")
+            st.write("")
             submit = st.form_submit_button("💳 Record Payment", use_container_width=True)
         
-        # Show UPI QR if selected
         if mode == "UPI" and amount > 0:
             st.markdown("---")
             st.markdown("### 📱 Scan to Pay")
@@ -554,56 +805,66 @@ def payments_page():
                 st.image(upi_qr(amount), caption=f"Pay ₹{amount:.2f}")
         
         if submit and student_id and amount > 0:
-            # Record payment
-            c.execute("INSERT INTO payments VALUES (NULL,?,?,?,?)",
-                     (student_id, amount, mode.lower(), datetime.now().strftime("%Y-%m-%d")))
-            c.execute("UPDATE students SET paid = paid + ? WHERE id=?", (amount, student_id))
-            conn.commit()
-            
-            st.success(f"✅ Payment of ₹{amount:.2f} recorded successfully!")
-            
-            # Generate receipt
-            receipt = generate_receipt(student_id, amount, mode)
-            st.download_button(
-                "📄 Download Receipt",
-                receipt,
-                f"receipt_{student_id}_{datetime.now().strftime('%Y%m%d')}.pdf",
-                "application/pdf",
-                use_container_width=True
-            )
-            
-            # WhatsApp notification
-            student_data = c.execute("SELECT name, phone FROM students WHERE id=?", (student_id,)).fetchone()
-            msg = f"Dear {student_data[0]}, your payment of ₹{amount:.2f} has been received. Thank you!"
-            wa_link = whatsapp_link(student_data[1], msg)
-            
-            st.markdown(f'<a href="{wa_link}" target="_blank" class="whatsapp-link">📱 Send WhatsApp Receipt</a>', unsafe_allow_html=True)
+            payment_id = add_payment(student_id, amount, mode.lower())
+            if payment_id:
+                st.success(f"✅ Payment of ₹{amount:.2f} recorded successfully!")
+                
+                receipt = generate_receipt(student_id, amount, mode)
+                if receipt:
+                    st.download_button(
+                        "📄 Download Receipt",
+                        receipt,
+                        f"receipt_{student_id}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                        "application/pdf",
+                        use_container_width=True
+                    )
+                
+                student = get_student_by_id(student_id)
+                if student:
+                    msg = f"Dear {student['name']}, your payment of ₹{amount:.2f} has been received. Thank you!"
+                    wa_link = whatsapp_link(student['phone'], msg)
+                    st.markdown(f'<a href="{wa_link}" target="_blank" class="whatsapp-link">📱 Send WhatsApp Receipt</a>', unsafe_allow_html=True)
     
     # Recent payments
     st.markdown("---")
     st.markdown("### 📊 Recent Payments")
     
-    payments_df = pd.read_sql_query("""
-        SELECT 
-            p.id as 'ID',
-            p.date as 'Date',
-            s.name as 'Student',
-            p.amount as 'Amount',
-            p.mode as 'Mode'
-        FROM payments p
-        JOIN students s ON p.student_id = s.id
-        ORDER BY p.id DESC
-        LIMIT 20
-    """, conn)
-    
+    payments_df = get_payments_df()
     if not payments_df.empty:
-        st.dataframe(payments_df, use_container_width=True, hide_index=True)
+        recent = payments_df.tail(20).copy()
+        recent['student_name'] = recent['student_id'].apply(
+            lambda x: get_student_by_id(int(x))['name'] if get_student_by_id(int(x)) else 'Unknown'
+        )
+        recent = recent[['id', 'date', 'student_name', 'amount', 'mode']]
+        recent.columns = ['ID', 'Date', 'Student', 'Amount', 'Mode']
+        st.dataframe(recent, use_container_width=True, hide_index=True)
+        
+        # Delete payment
+        st.markdown("---")
+        st.markdown("### 🗑️ Delete Payment")
+        
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            delete_id = st.number_input("Payment ID to Delete", min_value=1, step=1)
+        
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("🗑️ Delete Payment", type="secondary", use_container_width=True):
+                if delete_payment(int(delete_id)):
+                    st.success(f"✅ Payment ID {delete_id} deleted successfully!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ Payment ID {delete_id} not found!")
     else:
         st.info("No payments recorded yet")
 
-
 def expenses_page():
     """Expense management"""
+    if not sheets:
+        st.error("⚠️ Google Sheets not connected.")
+        return
+    
     st.markdown("# 📉 Expense Management")
     
     # Add expense
@@ -624,71 +885,188 @@ def expenses_page():
             submitted = st.form_submit_button("Add Expense", use_container_width=True)
             
             if submitted and title and amount > 0:
-                c.execute("INSERT INTO expenses VALUES (NULL,?,?,?,?)",
-                         (title, amount, category, datetime.now().strftime("%Y-%m-%d")))
-                conn.commit()
-                st.success(f"✅ Expense '{title}' added successfully!")
-                st.rerun()
+                expense_id = add_expense(title, amount, category)
+                if expense_id:
+                    st.success(f"✅ Expense '{title}' added successfully!")
+                    st.rerun()
     
     # Display expenses
     st.markdown("### 📋 All Expenses")
     
-    expenses_df = pd.read_sql_query("""
-        SELECT 
-            id as 'ID',
-            date as 'Date',
-            title as 'Title',
-            category as 'Category',
-            amount as 'Amount'
-        FROM expenses
-        ORDER BY id DESC
-    """, conn)
+    expenses_df = get_expenses_df()
     
     if not expenses_df.empty:
-        st.dataframe(expenses_df, use_container_width=True, hide_index=True)
+        display_df = expenses_df[['id', 'date', 'title', 'category', 'amount']].copy()
+        display_df.columns = ['ID', 'Date', 'Title', 'Category', 'Amount']
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Delete expense
+        st.markdown("---")
+        st.markdown("### 🗑️ Delete Expense")
+        
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            delete_id = st.number_input("Expense ID to Delete", min_value=1, step=1)
+        
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("🗑️ Delete Expense", type="secondary", use_container_width=True):
+                if delete_expense(int(delete_id)):
+                    st.success(f"✅ Expense ID {delete_id} deleted successfully!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ Expense ID {delete_id} not found!")
         
         # Summary
+        st.markdown("---")
         col1, col2 = st.columns(2)
-        col1.metric("Total Expenses", f"₹{expenses_df['Amount'].sum():,.0f}")
-        col2.metric("This Month", f"₹{expenses_df[expenses_df['Date'].str.startswith(datetime.now().strftime('%Y-%m'))]['Amount'].sum():,.0f}")
+        col1.metric("Total Expenses", f"₹{expenses_df['amount'].sum():,.0f}")
+        
+        current_month = datetime.now().strftime('%Y-%m')
+        month_expenses = expenses_df[expenses_df['date'].astype(str).str.startswith(current_month)]
+        col2.metric("This Month", f"₹{month_expenses['amount'].sum():,.0f}")
     else:
         st.info("No expenses recorded yet")
 
+def investments_page():
+    """Investment management for 3 partners"""
+    if not sheets:
+        st.error("⚠️ Google Sheets not connected.")
+        return
+    
+    st.markdown("# 💼 Investment Management")
+    st.markdown("### Track investments from all 3 partners")
+    
+    # Add investment
+    with st.expander("➕ Add New Investment", expanded=False):
+        with st.form("investment_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                investor = st.selectbox("Investor*", INVESTORS)
+                amount = st.number_input("Investment Amount (₹)*", min_value=0.0, step=1000.0)
+            
+            with col2:
+                notes = st.text_area("Notes (Optional)", placeholder="Purpose, bank details, etc.")
+            
+            submitted = st.form_submit_button("Add Investment", use_container_width=True)
+            
+            if submitted and investor and amount > 0:
+                investment_id = add_investment(investor, amount, notes)
+                if investment_id:
+                    st.success(f"✅ Investment of ₹{amount:,.0f} from {investor} recorded!")
+                    st.rerun()
+    
+    # Display investments
+    st.markdown("### 📋 All Investments")
+    
+    investments_df = get_investments_df()
+    
+    if not investments_df.empty:
+        display_df = investments_df[['id', 'date', 'investor', 'amount', 'notes']].copy()
+        display_df.columns = ['ID', 'Date', 'Investor', 'Amount', 'Notes']
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Investment summary by partner
+        st.markdown("---")
+        st.markdown("### 💰 Investment Summary by Partner")
+        
+        investor_summary = investments_df.groupby('investor')['amount'].agg(['sum', 'count']).reset_index()
+        investor_summary.columns = ['Investor', 'Total Investment', 'Number of Investments']
+        
+        col1, col2, col3 = st.columns(3)
+        
+        for idx, investor in enumerate(INVESTORS):
+            investor_data = investor_summary[investor_summary['Investor'] == investor]
+            
+            if not investor_data.empty:
+                total = float(investor_data.iloc[0]['Total Investment'])
+                count = int(investor_data.iloc[0]['Number of Investments'])
+            else:
+                total = 0
+                count = 0
+            
+            with [col1, col2, col3][idx]:
+                st.markdown(f"""
+                <div class="investor-card">
+                    <div style="font-size: 2rem;">👤</div>
+                    <p class="metric-value">₹{total:,.0f}</p>
+                    <p class="metric-label">{investor.upper()}</p>
+                    <p style="color: white; margin-top: 0.5rem; font-size: 0.9rem;">{count} investments</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Delete investment
+        st.markdown("---")
+        st.markdown("### 🗑️ Delete Investment")
+        
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            delete_id = st.number_input("Investment ID to Delete", min_value=1, step=1)
+        
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("🗑️ Delete Investment", type="secondary", use_container_width=True):
+                if delete_investment(int(delete_id)):
+                    st.success(f"✅ Investment ID {delete_id} deleted successfully!")
+                    st.rerun()
+                else:
+                    st.error(f"❌ Investment ID {delete_id} not found!")
+        
+        # Overall statistics
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Investment", f"₹{investments_df['amount'].sum():,.0f}")
+        col2.metric("Total Entries", len(investments_df))
+        col3.metric("Average Investment", f"₹{investments_df['amount'].mean():,.0f}")
+    else:
+        st.info("No investments recorded yet. Add your first investment above!")
 
 def analytics_page():
     """Finance analytics"""
+    if not sheets:
+        st.error("⚠️ Google Sheets not connected.")
+        return
+    
     st.markdown("# 📊 Financial Analytics")
+    
+    payments_df = get_payments_df()
+    expenses_df = get_expenses_df()
+    investments_df = get_investments_df()
     
     # Date-wise analysis
     st.markdown("### 📈 Income vs Expense Trend")
     
-    income_df = pd.read_sql_query("""
-        SELECT date, SUM(amount) as income 
-        FROM payments 
-        GROUP BY date 
-        ORDER BY date
-    """, conn)
-    
-    expense_df = pd.read_sql_query("""
-        SELECT date, SUM(amount) as expense 
-        FROM expenses 
-        GROUP BY date 
-        ORDER BY date
-    """, conn)
-    
-    if not income_df.empty or not expense_df.empty:
-        # Merge dataframes
-        df = pd.merge(income_df, expense_df, on="date", how="outer").fillna(0)
+    if not payments_df.empty or not expenses_df.empty:
+        if not payments_df.empty:
+            income_by_date = payments_df.groupby('date')['amount'].sum().reset_index()
+            income_by_date.columns = ['date', 'income']
+        else:
+            income_by_date = pd.DataFrame(columns=['date', 'income'])
+        
+        if not expenses_df.empty:
+            expense_by_date = expenses_df.groupby('date')['amount'].sum().reset_index()
+            expense_by_date.columns = ['date', 'expense']
+        else:
+            expense_by_date = pd.DataFrame(columns=['date', 'expense'])
+        
+        df = pd.merge(income_by_date, expense_by_date, on="date", how="outer").fillna(0)
         df['profit'] = df['income'] - df['expense']
         
-        # Line chart
         st.line_chart(df.set_index("date")[['income', 'expense', 'profit']])
         
-        # Summary
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Income", f"₹{df['income'].sum():,.0f}")
-        col2.metric("Total Expense", f"₹{df['expense'].sum():,.0f}")
-        col3.metric("Net Profit", f"₹{df['profit'].sum():,.0f}")
+        # Summary with investment
+        col1, col2, col3, col4 = st.columns(4)
+        total_income = float(df['income'].sum())
+        total_expense = float(df['expense'].sum())
+        total_investment = float(investments_df['amount'].sum()) if not investments_df.empty else 0
+        
+        col1.metric("Total Income", f"₹{total_income:,.0f}")
+        col2.metric("Total Expense", f"₹{total_expense:,.0f}")
+        col3.metric("Total Investment", f"₹{total_investment:,.0f}")
+        col4.metric("Net Profit", f"₹{(total_income - total_expense):,.0f}")
     else:
         st.info("Not enough data for analysis yet")
     
@@ -696,18 +1074,21 @@ def analytics_page():
     st.markdown("---")
     st.markdown("### 📊 Expense Breakdown by Category")
     
-    category_df = pd.read_sql_query("""
-        SELECT category, SUM(amount) as total
-        FROM expenses
-        GROUP BY category
-        ORDER BY total DESC
-    """, conn)
-    
-    if not category_df.empty:
-        st.bar_chart(category_df.set_index('category'))
+    if not expenses_df.empty:
+        category_total = expenses_df.groupby('category')['amount'].sum().reset_index()
+        category_total.columns = ['category', 'total']
+        st.bar_chart(category_total.set_index('category'))
     else:
         st.info("No expense data available")
-
+    
+    # Investment distribution
+    if not investments_df.empty:
+        st.markdown("---")
+        st.markdown("### 💼 Investment Distribution by Partner")
+        
+        investor_total = investments_df.groupby('investor')['amount'].sum().reset_index()
+        investor_total.columns = ['investor', 'total']
+        st.bar_chart(investor_total.set_index('investor'))
 
 # ================= MAIN APP =================
 
@@ -715,7 +1096,7 @@ def main():
     if not st.session_state.logged_in:
         login_page()
     else:
-        # Top bar with user info and logout
+        # Top bar
         col1, col2, col3 = st.columns([2, 3, 1])
         
         with col1:
@@ -730,7 +1111,7 @@ def main():
         st.markdown("---")
         
         # Navigation tabs
-        tabs = st.tabs(["🏠 Overview", "🎓 Students", "💰 Payments", "📉 Expenses", "📊 Analytics"])
+        tabs = st.tabs(["🏠 Overview", "🎓 Students", "💰 Payments", "📉 Expenses", "💼 Investments", "📊 Analytics"])
         
         with tabs[0]:
             overview_page()
@@ -745,8 +1126,10 @@ def main():
             expenses_page()
         
         with tabs[4]:
+            investments_page()
+        
+        with tabs[5]:
             analytics_page()
-
 
 if __name__ == "__main__":
     main()
