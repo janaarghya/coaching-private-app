@@ -309,7 +309,7 @@ def get_student_by_id(student_id):
 # ================= CONFIG =================
 USERS = {"Arghya": "Arghya@9382", "Tapan": "Tapan@6296", "Suman": "Suman@8348"}
 UPI_ID = "yourupi@bank"
-INVESTORS = ["arghya", "friend1", "friend2"]
+INVESTORS = ["Arghya", "Tapan", "Suman"]
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
