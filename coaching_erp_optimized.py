@@ -307,7 +307,7 @@ def get_student_by_id(student_id):
     return student.iloc[0].to_dict() if not student.empty else None
 
 # ================= CONFIG =================
-USERS = {"arghya": "1234", "friend1": "1234", "friend2": "1234"}
+USERS = {"Arghya": "Arghya@9382", "Tapan": "Tapan@6296", "Suman": "Suman@8348"}
 UPI_ID = "yourupi@bank"
 INVESTORS = ["arghya", "friend1", "friend2"]
 
