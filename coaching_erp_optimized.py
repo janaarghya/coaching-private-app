@@ -430,7 +430,7 @@ def overview_page():
         st.error("⚠️ Google Sheets not connected.")
         return
     
-    st.markdown("# 🏠 Dashboard Overview")
+    st.markdown("# 🏠 LogicRoot")
     
     # Add refresh button
     if st.button("🔄 Refresh Data"):
